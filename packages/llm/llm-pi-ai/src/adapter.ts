@@ -201,14 +201,66 @@ function reasoningInfo(
   }
 }
 
-/** Merge deployment headers while removing case-insensitive attribution collisions. */
-function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
+/** The request header OpenCode's gateways read to route one conversation to a stable replica. */
+const OPENCODE_SESSION_HEADER = 'x-opencode-session'
+
+/** The pi-ai provider ids whose endpoints require {@link OPENCODE_SESSION_HEADER}. */
+const OPENCODE_PROVIDERS: ReadonlySet<string> = new Set(['opencode', 'opencode-go'])
+
+/** The endpoint host serving OpenCode's gateways. */
+const OPENCODE_HOST = 'opencode.ai'
+
+/**
+ * Whether one route reaches an OpenCode gateway that requires the session
+ * header: its pi-ai provider id is an OpenCode one, or its resolved endpoint is
+ * hosted by OpenCode. The endpoint test covers a route a deployment renamed or
+ * declared by hand, which the provider id cannot identify.
+ * @param provider - pi-ai provider id (the route key).
+ * @param baseUrl - the model's resolved endpoint.
+ * @returns true when requests to this route must carry the session header.
+ */
+export function requiresOpencodeSession(provider: string, baseUrl: string): boolean {
+  if (OPENCODE_PROVIDERS.has(provider)) return true
+  let host: string
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase()
+  } catch (_invalidBaseUrl) {
+    // A baseURL the URL parser refuses reaches pi-ai, which refuses it too; no OpenCode route can match.
+    return false
+  }
+  return host === OPENCODE_HOST || host.endsWith(`.${OPENCODE_HOST}`)
+}
+
+/**
+ * Merge deployment headers while removing case-insensitive attribution
+ * collisions, then add the OpenCode session header those endpoints require.
+ *
+ * The Harness session id is the identity OpenCode Go routes and caches by, so
+ * it wins a same-named deployment header, and it is sent only where an OpenCode
+ * gateway reads it — never to unrelated providers. pi-ai's session-affinity
+ * formats emit other header spellings, so the adapter adds this one.
+ * @param headers - profile-level deployment headers, when any.
+ * @param provider - pi-ai provider id (the route key).
+ * @param baseUrl - the model's resolved endpoint.
+ * @param sessionId - the Harness session id for this request, when one exists.
+ * @returns headers for the provider request.
+ */
+function requestHeaders(
+  headers: Readonly<Record<string, string>> | undefined,
+  provider: string,
+  baseUrl: string,
+  sessionId: GenerateOptions['sessionId'],
+): Record<string, string> {
   const attribution = attributionHeaders()
   const reserved = new Set(Object.keys(attribution).map(name => name.toLowerCase()))
-  return {
+  const merged: Record<string, string> = {
     ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
     ...attribution,
   }
+  if (sessionId !== undefined && requiresOpencodeSession(provider, baseUrl)) {
+    merged[OPENCODE_SESSION_HEADER] = String(sessionId)
+  }
+  return merged
 }
 
 /**
@@ -385,7 +437,7 @@ export class PiAiAdapter extends LlmAdapter {
         signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
         // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: requestHeaders(profile.headers, options.provider, model.baseUrl, options.sessionId),
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
       let exhausted = false
