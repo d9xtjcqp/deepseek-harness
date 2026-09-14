@@ -14,6 +14,7 @@ import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
+import { requiresOpencodeSession } from '../src/adapter.ts'
 import { DEFAULT_MAX_REQUEST_IMAGE_BYTES, resolveProfiles } from '../src/config.ts'
 import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
@@ -121,6 +122,46 @@ describe('PiAiAdapter provider routing', () => {
     await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(server.headers[0]?.['x-company']).toBe('private')
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
+  })
+
+  it('sends the Harness session id to an OpenCode route as its session header', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'opencode-go': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: server.url,
+          models: [{ id: 'deepseek-v4.1-flash' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      provider: 'opencode-go',
+      model: 'deepseek-v4.1-flash',
+      messages: [],
+      sessionId: 'opencode-session' as never,
+    })
+
+    expect(server.headers[0]?.['x-opencode-session']).toBe('opencode-session')
+  })
+
+  it('keeps the session header off providers that do not read it', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url)
+    await assemble(ctx, { model: 'deepseek-v4-flash', messages: [], sessionId: 'session-for-pi' as never })
+    expect(server.headers[0]).not.toHaveProperty('x-opencode-session')
+  })
+
+  it('recognizes an OpenCode endpoint under a renamed or subdomain route', () => {
+    expect(requiresOpencodeSession('opencode-go-v41', 'https://opencode.ai/zen/go/v1')).toBe(true)
+    expect(requiresOpencodeSession('opencode', 'https://opencode.ai/zen/v1')).toBe(true)
+    expect(requiresOpencodeSession('vendor', 'https://zen.opencode.ai/v1')).toBe(true)
+    expect(requiresOpencodeSession('deepseek', 'https://api.deepseek.com')).toBe(false)
+    expect(requiresOpencodeSession('vendor', 'not a url')).toBe(false)
   })
 
   it('forwards common stream options and profile reasoning', async () => {
